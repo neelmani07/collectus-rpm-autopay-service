@@ -1,58 +1,38 @@
 # rpm-autopay-service
 
-Collectus hackathon backend: **RPM (simulate repayment) + Autopay + orchestration**.
+Collectus hackathon backend — **Tamara-like shop + installments + Smart Autocharge**.
 
-Calls the AI Decision service (`POST /v1/decide`). Ships with a **mock AI** so Frontend + Backend work before the teammate service is ready.
+## Flow
+
+1. Browse products → checkout with **Pay in 3/4**
+2. First installment paid immediately; remaining created as upcoming
+3. Customer pays a due/overdue installment
+4. RPM event `repayment.succeeded` → **AI decision** → Autopay may settle other overdue
 
 ## Quick start
 
 ```bash
 cd rpm-autopay-service
-python3 -m venv .venv
-source .venv/bin/activate
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
 uvicorn app.main:app --reload --port 8000
 ```
 
-Open API docs: http://127.0.0.1:8000/docs
+Docs: http://127.0.0.1:8000/docs
 
-## Main endpoints
+## Key APIs
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/health` | Health + whether mock AI is on |
-| GET | `/api/customers` | Seed demo customers |
-| POST | `/api/rpm/repay` | Simulate repayment → AI → autopay |
-| GET | `/api/decisions` | Recent audit log |
+| GET | `/api/products` | Catalog |
+| GET | `/api/customers` | Demo personas |
+| POST | `/api/checkout` | Buy with installments (first payment now) |
+| GET | `/api/customers/{id}/orders` | Purchases + installment schedule |
+| GET | `/api/customers/{id}/installments` | Flat installment list |
+| POST | `/api/installments/{id}/pay` | Pay installment → RPM → AI → Autopay |
 | POST | `/api/admin/reset` | Reset seed data |
 
-### Example
+## AI
 
-```bash
-curl -X POST http://127.0.0.1:8000/api/rpm/repay \
-  -H 'Content-Type: application/json' \
-  -d '{"customer_id":"c_charge_001","amount":400,"currency":"SAR"}'
-```
-
-## AI integration
-
-| Env | Meaning |
-| --- | --- |
-| `USE_MOCK_AI=true` | Use built-in Option A-lite scorecard |
-| `USE_MOCK_AI=false` | Call `AI_DECISION_URL` (teammate service) |
-| On remote failure | Automatic mock fallback |
-
-Expected AI contract: see one-pager / `DecisionRequest` + `DecisionResponse` in `app/models.py`.
-
-## Deploy (Render)
-
-- Root: `rpm-autopay-service`
-- Build: `pip install -r requirements.txt`
-- Start: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
-- Set `CORS_ORIGINS` to your frontend URL
-- Set `USE_MOCK_AI` / `AI_DECISION_URL` as needed
-
-## Production path (later)
-
-Swap simulated RPM event → real Tamara `repayment.succeeded`; swap Autopay mock → real Collections/Payments API; keep the same decision contract.
+`USE_MOCK_AI=true` uses built-in scorecard. Set `USE_MOCK_AI=false` + `AI_DECISION_URL` for teammate service.
