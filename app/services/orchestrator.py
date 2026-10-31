@@ -1,4 +1,4 @@
-"""Checkout, manual repayment, and cron-based Smart Autocharge."""
+"""Checkout, manual repayment, event Smart Autocharge, cron Normal Autocharge."""
 
 from __future__ import annotations
 
@@ -16,7 +16,6 @@ from app.db import (
     get_customer,
     get_decision,
     get_installment,
-    get_order,
     get_payment_history_by_event,
     list_customers,
     list_overdue_installments,
@@ -88,8 +87,156 @@ def checkout(customer_id: str, product_id: str, plan: int) -> CheckoutResult:
     )
 
 
-def pay_installment(installment_id: str, customer_id: str) -> ManualPayResult:
-    """Customer pays only their installment. No Autopay here — cron handles that."""
+async def _run_smart_autocharge(
+    *,
+    customer: dict[str, Any],
+    amount_paid: float,
+    currency: str,
+    exclude_installment_id: Optional[str],
+    parent_repay_event_id: str,
+) -> Optional[OrchestrationResult]:
+    """Event + AI Smart Autocharge — only against OVERDUE installments."""
+    customer_id = customer["customer_id"]
+    overdue_items = list_overdue_installments(
+        customer_id,
+        exclude_id=exclude_installment_id,
+        statuses=("overdue",),
+    )
+    overdue_before = round(sum(float(i["amount"]) for i in overdue_items), 2)
+    if overdue_before <= 0:
+        return None
+
+    event_id = f"evt_smart_{uuid.uuid4().hex[:16]}"
+    days_overdue = _days_overdue(overdue_items)
+
+    features = FeatureSet(
+        days_overdue=days_overdue,
+        pm_health=float(customer["pm_health"]),
+        fails_7d=int(customer["fails_7d"]),
+        recent_success=float(customer["recent_success"]),
+        repayment_strength=_repayment_strength(amount_paid, overdue_before),
+        overdue_amount=overdue_before,
+        amount_paid=amount_paid,
+    )
+
+    decision_payload = DecisionRequest(
+        event_id=event_id,
+        customer_id=customer_id,
+        event_type="repayment.succeeded",
+        amount_paid=amount_paid,
+        overdue_amount=overdue_before,
+        currency=currency,
+        features=features,
+    )
+
+    settings = get_settings()
+    decision = await ai_client.decide(decision_payload, settings)
+
+    save_event(
+        event_id=event_id,
+        customer_id=customer_id,
+        event_type="smart_autocharge.decision",
+        amount=decision.amount if decision.action != DecisionAction.SKIP else 0.0,
+        currency=currency,
+    )
+
+    charge_result = autopay.execute_charge(
+        customer=customer,
+        amount=decision.amount,
+        action=decision.action,
+        idempotency_key=event_id,
+    )
+
+    overdue_after = overdue_before
+    if (
+        charge_result.status == "success"
+        and decision.action != DecisionAction.SKIP
+        and decision.amount > 0
+    ):
+        settled = apply_autocharge_to_overdue(
+            customer_id,
+            decision.amount,
+            exclude_id=exclude_installment_id,
+            statuses=("overdue",),
+        )
+        remaining = list_overdue_installments(
+            customer_id,
+            exclude_id=exclude_installment_id,
+            statuses=("overdue",),
+        )
+        overdue_after = round(sum(float(i["amount"]) for i in remaining), 2)
+        charge_result = AutopayResult(
+            status=charge_result.status,
+            transaction_id=charge_result.transaction_id,
+            message=charge_result.message,
+            installments_settled=settled,
+        )
+        smart_status = "succeeded"
+        smart_amount = decision.amount
+    else:
+        if decision.action == DecisionAction.SKIP:
+            smart_status = "skipped_by_ai"
+        elif charge_result.status == "failed":
+            smart_status = "failed"
+        else:
+            smart_status = "skipped"
+        smart_amount = 0.0
+        charge_result = AutopayResult(
+            status="skipped" if decision.action == DecisionAction.SKIP else charge_result.status,
+            transaction_id=None,
+            message=charge_result.message or "Smart Autocharge did not charge",
+            installments_settled=[],
+        )
+
+    add_payment_history(
+        customer_id=customer_id,
+        event_id=event_id,
+        payment_type="smart_autocharge",
+        title="Smart autocharge",
+        amount=smart_amount if smart_status == "succeeded" else overdue_before,
+        currency=currency,
+        status=smart_status,
+        details={
+            "description": (
+                "Triggered by repayment event. AI decided whether Autopay should "
+                "collect other OVERDUE installments only (never upcoming)."
+            ),
+            "trigger": "event",
+            "parent_repay_event_id": parent_repay_event_id,
+            "ai_action": decision.action.value,
+            "ai_score": decision.score,
+            "ai_reason": decision.reason,
+            "autopay_status": charge_result.status,
+            "autopay_message": charge_result.message,
+            "installments_settled": charge_result.installments_settled,
+            "overdue_before": overdue_before,
+            "overdue_after": overdue_after,
+        },
+    )
+
+    result = OrchestrationResult(
+        event_id=event_id,
+        customer_id=customer_id,
+        customer_name=customer["name"],
+        scenario=customer.get("scenario", ""),
+        amount_paid=amount_paid,
+        paid_installment_id=exclude_installment_id,
+        overdue_before=overdue_before,
+        currency=currency,
+        decision=decision,
+        autopay=charge_result,
+        overdue_after=overdue_after,
+        created_at=datetime.now(timezone.utc),
+        order_snapshot=None,
+        trigger="event",
+        scheduled_for=None,
+    )
+    save_decision(result)
+    return result
+
+
+async def pay_installment(installment_id: str, customer_id: str) -> ManualPayResult:
+    """Customer pays their installment, then event-based Smart Autocharge may run on OVERDUE only."""
     customer = get_customer(customer_id)
     if not customer:
         raise HTTPException(status_code=404, detail=f"Unknown customer_id: {customer_id}")
@@ -108,9 +255,9 @@ def pay_installment(installment_id: str, customer_id: str) -> ManualPayResult:
     product_name = paid.get("product_name", "")
     merchant = paid.get("merchant", "")
 
-    event_id = f"evt_repay_{uuid.uuid4().hex[:16]}"
+    repay_event_id = f"evt_repay_{uuid.uuid4().hex[:16]}"
     save_event(
-        event_id=event_id,
+        event_id=repay_event_id,
         customer_id=customer_id,
         event_type="repayment.succeeded",
         amount=amount_paid,
@@ -120,7 +267,7 @@ def pay_installment(installment_id: str, customer_id: str) -> ManualPayResult:
 
     add_payment_history(
         customer_id=customer_id,
-        event_id=event_id,
+        event_id=repay_event_id,
         payment_type="manual_repayment",
         title=f"Manual repayment · {product_name}",
         amount=amount_paid,
@@ -132,12 +279,21 @@ def pay_installment(installment_id: str, customer_id: str) -> ManualPayResult:
         details={
             "sequence": paid.get("sequence"),
             "plan_size": paid.get("plan_size"),
-            "description": "Customer paid this installment. Autopay is not triggered here.",
+            "description": "Customer paid this installment.",
         },
     )
 
+    # Smart Autocharge: event + AI, overdue only (never upcoming)
+    await _run_smart_autocharge(
+        customer=customer,
+        amount_paid=amount_paid,
+        currency=currency,
+        exclude_installment_id=installment_id,
+        parent_repay_event_id=repay_event_id,
+    )
+
     return ManualPayResult(
-        event_id=event_id,
+        event_id=repay_event_id,
         customer_id=customer_id,
         installment_id=installment_id,
         amount_paid=amount_paid,
@@ -154,9 +310,8 @@ async def run_collections_cron(
     scheduled_for: str = "09:00",
 ) -> CronRunResult:
     """
-    Daily collections window (cron).
-    Runs Smart Autocharge only — does not execute normal autocharge first.
-    Normal amount is stored as reference inside the smart history details.
+    Normal autocharge — cron / schedule based.
+    Charges OVERDUE installments only. No AI. Never charges upcoming.
     """
     targets = [get_customer(customer_id)] if customer_id else list_customers()
     targets = [c for c in targets if c]
@@ -168,66 +323,40 @@ async def run_collections_cron(
 
     for customer in targets:
         cid = customer["customer_id"]
-        overdue_items = list_overdue_installments(cid)
+        overdue_items = list_overdue_installments(cid, statuses=("overdue",))
         scanned += 1
         if not overdue_items:
+            skipped += 1
             continue
 
         overdue_before = round(sum(float(i["amount"]) for i in overdue_items), 2)
-        days_overdue = _days_overdue(overdue_items)
         currency = customer.get("currency", "SAR")
         event_id = f"evt_cron_{uuid.uuid4().hex[:16]}"
-
-        # Recent manual activity strengthens the smart-charge signal
-        recent_paid = float(customer.get("recent_success", 0.5))
-        activity_boost = 0.15 if customer.get("last_activity_at") else 0.0
-
-        features = FeatureSet(
-            days_overdue=days_overdue,
-            pm_health=float(customer["pm_health"]),
-            fails_7d=int(customer["fails_7d"]),
-            recent_success=min(1.0, recent_paid + activity_boost),
-            repayment_strength=min(1.0, 0.5 + activity_boost),
-            overdue_amount=overdue_before,
-            amount_paid=0.0,
-        )
-
-        decision_payload = DecisionRequest(
-            event_id=event_id,
-            customer_id=cid,
-            event_type="collections.cron",
-            amount_paid=0.0,
-            overdue_amount=overdue_before,
-            currency=currency,
-            features=features,
-        )
-
-        settings = get_settings()
-        decision = await ai_client.decide(decision_payload, settings)
 
         save_event(
             event_id=event_id,
             customer_id=cid,
             event_type="collections.cron",
-            amount=decision.amount if decision.action != DecisionAction.SKIP else 0.0,
+            amount=overdue_before,
             currency=currency,
         )
 
+        # Normal autocharge = full overdue, no AI gate
         charge_result = autopay.execute_charge(
             customer=customer,
-            amount=decision.amount,
-            action=decision.action,
+            amount=overdue_before,
+            action=DecisionAction.CHARGE,
             idempotency_key=event_id,
         )
 
         overdue_after = overdue_before
-        if (
-            charge_result.status == "success"
-            and decision.action != DecisionAction.SKIP
-            and decision.amount > 0
-        ):
-            settled = apply_autocharge_to_overdue(cid, decision.amount)
-            remaining = list_overdue_installments(cid)
+        if charge_result.status == "success":
+            settled = apply_autocharge_to_overdue(
+                cid,
+                overdue_before,
+                statuses=("overdue",),
+            )
+            remaining = list_overdue_installments(cid, statuses=("overdue",))
             overdue_after = round(sum(float(i["amount"]) for i in remaining), 2)
             charge_result = AutopayResult(
                 status=charge_result.status,
@@ -236,61 +365,52 @@ async def run_collections_cron(
                 installments_settled=settled,
             )
             charged += 1
-            smart_status = "succeeded"
-            smart_amount = decision.amount
+            status = "succeeded"
+            amount = overdue_before - overdue_after
         else:
             skipped += 1
-            if decision.action == DecisionAction.SKIP:
-                smart_status = "skipped_by_ai"
-            elif charge_result.status == "failed":
-                smart_status = "failed"
-            else:
-                smart_status = "skipped"
-            smart_amount = 0.0
-            charge_result = AutopayResult(
-                status=charge_result.status if charge_result.status != "success" else "skipped",
-                transaction_id=None,
-                message=charge_result.message or "Smart Autocharge did not charge",
-                installments_settled=[],
-            )
+            status = "failed"
+            amount = overdue_before
 
-        # Only Smart Autocharge is executed. Normal is reference-only in details.
         add_payment_history(
             customer_id=cid,
             event_id=event_id,
-            payment_type="smart_autocharge",
-            title=f"Smart autocharge · cron {scheduled_for}",
-            amount=smart_amount if smart_status == "succeeded" else overdue_before,
+            payment_type="normal_autocharge",
+            title=f"Normal autocharge · {scheduled_for}",
+            amount=amount if status == "succeeded" else overdue_before,
             currency=currency,
-            status=smart_status,
+            status=status,
             details={
                 "description": (
-                    "Daily collections cron ran Smart Autocharge. "
-                    "AI decided whether Autopay should collect overdue."
+                    "Scheduled cron autocharge. Collects OVERDUE installments only — "
+                    "never upcoming. No AI decision."
                 ),
                 "trigger": "cron",
                 "scheduled_for": scheduled_for,
-                "ai_action": decision.action.value,
-                "ai_score": decision.score,
-                "ai_reason": decision.reason,
+                "overdue_before": overdue_before,
+                "overdue_after": overdue_after,
                 "autopay_status": charge_result.status,
                 "autopay_message": charge_result.message,
                 "installments_settled": charge_result.installments_settled,
-                "overdue_before": overdue_before,
-                "overdue_after": overdue_after,
-                "normal_would_charge_amount": overdue_before,
-                "normal_note": (
-                    "Normal cron autocharge would have attempted the full overdue "
-                    "with no AI gate. It was not executed — Smart mode replaced it."
-                ),
             },
         )
 
+        # Store a synthetic decision for detail view (always charge)
+        from app.models import DecisionResponse
+
+        decision = DecisionResponse(
+            action=DecisionAction.CHARGE,
+            amount=overdue_before,
+            score=1.0,
+            reason="Normal cron autocharge — no AI; charge all overdue.",
+            baseline_action=DecisionAction.CHARGE,
+            source="cron",
+        )
         result = OrchestrationResult(
             event_id=event_id,
             customer_id=cid,
             customer_name=customer["name"],
-            scenario=customer["scenario"],
+            scenario=customer.get("scenario", ""),
             amount_paid=0.0,
             paid_installment_id=None,
             overdue_before=overdue_before,
@@ -313,8 +433,8 @@ async def run_collections_cron(
         customers_skipped=skipped,
         results=results,
         message=(
-            f"Cron {scheduled_for}: scanned {scanned}, "
-            f"smart-charged {charged}, skipped {skipped}"
+            f"Normal autocharge cron {scheduled_for}: scanned {scanned}, "
+            f"charged {charged}, skipped {skipped}"
         ),
     )
 

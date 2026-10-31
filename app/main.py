@@ -52,8 +52,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 settings = get_settings()
 app = FastAPI(
     title=settings.app_name,
-    description="Collectus Smart Autocharge — shop, installments, cron Smart Autopay",
-    version="0.4.0",
+    description="Collectus — manual pay, event Smart Autocharge, cron Normal Autocharge",
+    version="0.5.0",
     lifespan=lifespan,
 )
 
@@ -147,13 +147,13 @@ def payment_event_detail(event_id: str) -> PaymentDetailResponse:
 
 
 @app.post("/api/installments/{installment_id}/pay", response_model=ManualPayResult)
-def pay(installment_id: str, body: PayInstallmentRequest) -> ManualPayResult:
-    return pay_installment(installment_id, body.customer_id)
+async def pay(installment_id: str, body: PayInstallmentRequest) -> ManualPayResult:
+    return await pay_installment(installment_id, body.customer_id)
 
 
 @app.post("/api/cron/collections", response_model=CronRunResult)
 async def cron_collections(body: CronRequest) -> CronRunResult:
-    """Simulate the daily collections cron (e.g. 09:00). Smart Autocharge only."""
+    """Simulate daily Normal Autocharge cron (e.g. 09:00). Overdue only, no AI."""
     return await run_collections_cron(
         customer_id=body.customer_id,
         scheduled_for=body.scheduled_for,

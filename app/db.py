@@ -778,17 +778,25 @@ def mark_installment_paid(installment_id: str) -> dict[str, Any]:
     return get_installment(installment_id)  # type: ignore[return-value]
 
 
-def list_overdue_installments(customer_id: str, exclude_id: Optional[str] = None) -> list[dict[str, Any]]:
+def list_overdue_installments(
+    customer_id: str,
+    exclude_id: Optional[str] = None,
+    statuses: tuple[str, ...] = ("overdue",),
+) -> list[dict[str, Any]]:
+    """Return installments eligible for autocharge. Default: overdue only (never upcoming)."""
     refresh_installment_statuses(customer_id)
+    if not statuses:
+        statuses = ("overdue",)
+    placeholders = ",".join("?" for _ in statuses)
     with get_connection() as conn:
         rows = conn.execute(
-            """
+            f"""
             SELECT * FROM installments
             WHERE customer_id = ?
-              AND status IN ('due', 'overdue')
+              AND status IN ({placeholders})
             ORDER BY due_date ASC
             """,
-            (customer_id,),
+            (customer_id, *statuses),
         ).fetchall()
         items = [_installment_row_to_dict(conn, row) for row in rows]
         if exclude_id:
@@ -800,11 +808,14 @@ def apply_autocharge_to_overdue(
     customer_id: str,
     charge_amount: float,
     exclude_id: Optional[str] = None,
+    statuses: tuple[str, ...] = ("overdue",),
 ) -> list[str]:
-    """Apply successful autocharge across oldest overdue installments."""
+    """Apply successful autocharge across oldest overdue installments only."""
     remaining = round(charge_amount, 2)
     settled: list[str] = []
-    overdue = list_overdue_installments(customer_id, exclude_id=exclude_id)
+    overdue = list_overdue_installments(
+        customer_id, exclude_id=exclude_id, statuses=statuses
+    )
     for item in overdue:
         if remaining <= 0:
             break
