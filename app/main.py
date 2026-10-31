@@ -1,8 +1,9 @@
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
+from typing import AsyncIterator, Optional
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 
 from app.config import get_settings
 from app.db import (
@@ -20,13 +21,25 @@ from app.db import (
 from app.models import (
     CheckoutRequest,
     CheckoutResult,
+    CronRunResult,
+    CustomerOut,
     HealthResponse,
-    OrchestrationResult,
+    ManualPayResult,
     PayInstallmentRequest,
     PaymentDetailResponse,
     PaymentHistoryItem,
 )
-from app.services.orchestrator import checkout, pay_installment, payment_detail
+from app.services.orchestrator import (
+    checkout,
+    pay_installment,
+    payment_detail,
+    run_collections_cron,
+)
+
+
+class CronRequest(BaseModel):
+    customer_id: Optional[str] = None
+    scheduled_for: str = Field(default="09:00")
 
 
 @asynccontextmanager
@@ -39,8 +52,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 settings = get_settings()
 app = FastAPI(
     title=settings.app_name,
-    description="Collectus Smart Autocharge — shop, installments, RPM + Autopay",
-    version="0.3.0",
+    description="Collectus Smart Autocharge — shop, installments, cron Smart Autopay",
+    version="0.4.0",
     lifespan=lifespan,
 )
 
@@ -65,7 +78,31 @@ def health() -> HealthResponse:
 
 @app.get("/api/customers")
 def customers() -> dict:
-    return {"customers": list_customers()}
+    """Login directory only — UI must not mix accounts after login."""
+    return {
+        "customers": [
+            CustomerOut.model_validate(
+                {
+                    **c,
+                    "notes": "",  # hide internal scenario notes from login list
+                    "scenario": "",
+                }
+            )
+            for c in list_customers()
+        ]
+    }
+
+
+@app.get("/api/customers/{customer_id}", response_model=CustomerOut)
+def customer_me(customer_id: str) -> CustomerOut:
+    row = get_customer(customer_id)
+    if not row:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=404, detail="Customer not found")
+    # Strip internal demo labels from customer-facing payload
+    safe = {**row, "notes": "", "scenario": ""}
+    return CustomerOut.model_validate(safe)
 
 
 @app.get("/api/products")
@@ -109,9 +146,18 @@ def payment_event_detail(event_id: str) -> PaymentDetailResponse:
     return payment_detail(event_id)
 
 
-@app.post("/api/installments/{installment_id}/pay", response_model=OrchestrationResult)
-async def pay(installment_id: str, body: PayInstallmentRequest) -> OrchestrationResult:
-    return await pay_installment(installment_id, body.customer_id)
+@app.post("/api/installments/{installment_id}/pay", response_model=ManualPayResult)
+def pay(installment_id: str, body: PayInstallmentRequest) -> ManualPayResult:
+    return pay_installment(installment_id, body.customer_id)
+
+
+@app.post("/api/cron/collections", response_model=CronRunResult)
+async def cron_collections(body: CronRequest) -> CronRunResult:
+    """Simulate the daily collections cron (e.g. 09:00). Smart Autocharge only."""
+    return await run_collections_cron(
+        customer_id=body.customer_id,
+        scheduled_for=body.scheduled_for,
+    )
 
 
 @app.get("/api/decisions")

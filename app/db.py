@@ -147,7 +147,8 @@ def init_db() -> None:
                 recent_success REAL NOT NULL,
                 currency TEXT NOT NULL DEFAULT 'SAR',
                 scenario TEXT NOT NULL,
-                notes TEXT NOT NULL DEFAULT ''
+                notes TEXT NOT NULL DEFAULT '',
+                last_activity_at TEXT
             );
 
             CREATE TABLE IF NOT EXISTS products (
@@ -220,7 +221,12 @@ def init_db() -> None:
         version = conn.execute(
             "SELECT value FROM meta WHERE key = 'schema_version'"
         ).fetchone()
-        if not version or version["value"] != "3":
+        # Ensure column exists for upgrades
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(customers)").fetchall()}
+        if "last_activity_at" not in cols:
+            conn.execute("ALTER TABLE customers ADD COLUMN last_activity_at TEXT")
+
+        if not version or version["value"] != "4":
             conn.execute("DELETE FROM payment_history")
             conn.execute("DELETE FROM decisions")
             conn.execute("DELETE FROM events")
@@ -229,7 +235,7 @@ def init_db() -> None:
             conn.execute("DELETE FROM products")
             conn.execute("DELETE FROM customers")
             conn.execute(
-                "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', '3')"
+                "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', '4')"
             )
             _seed(conn)
 
@@ -240,8 +246,8 @@ def _seed(conn: sqlite3.Connection) -> None:
             """
             INSERT INTO customers (
                 customer_id, name, pm_health, fails_7d, recent_success,
-                currency, scenario, notes
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                currency, scenario, notes, last_activity_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
             """,
             (
                 customer["customer_id"],
@@ -373,9 +379,17 @@ def reset_seed_data() -> None:
         conn.execute("DELETE FROM products")
         conn.execute("DELETE FROM customers")
         conn.execute(
-            "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', '3')"
+            "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', '4')"
         )
         _seed(conn)
+
+
+def touch_customer_activity(customer_id: str) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE customers SET last_activity_at = ? WHERE customer_id = ?",
+            (_utc_now(), customer_id),
+        )
 
 
 def add_payment_history(

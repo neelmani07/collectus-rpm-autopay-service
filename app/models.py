@@ -31,6 +31,7 @@ class CustomerOut(BaseModel):
     notes: str = ""
     overdue_amount: float = 0
     days_overdue: int = 0
+    last_activity_at: Optional[str] = None
 
 
 class ProductOut(BaseModel):
@@ -126,6 +127,17 @@ class CheckoutResult(BaseModel):
     message: str
 
 
+class ManualPayResult(BaseModel):
+    event_id: str
+    customer_id: str
+    installment_id: str
+    amount_paid: float
+    currency: str
+    product_name: str = ""
+    message: str
+    created_at: datetime
+
+
 class OrchestrationResult(BaseModel):
     event_id: str
     customer_id: str
@@ -140,6 +152,17 @@ class OrchestrationResult(BaseModel):
     overdue_after: float
     created_at: datetime
     order_snapshot: Optional[OrderOut] = None
+    trigger: str = "cron"
+    scheduled_for: Optional[str] = None
+
+
+class CronRunResult(BaseModel):
+    scheduled_for: str
+    customers_scanned: int
+    customers_charged: int
+    customers_skipped: int
+    results: list[OrchestrationResult] = Field(default_factory=list)
+    message: str
 
 
 class PaymentHistoryItem(BaseModel):
