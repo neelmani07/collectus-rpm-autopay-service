@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: rpm-autopay-service
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: USE_MOCK_AI
+        value: "true"
+      - key: CORS_ORIGINS
+        sync: false
+      - key: AI_DECISION_URL
+        sync: false
