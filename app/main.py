@@ -12,6 +12,7 @@ from app.db import (
     list_decisions,
     list_installments,
     list_orders,
+    list_payment_history,
     list_products,
     refresh_installment_statuses,
     reset_seed_data,
@@ -22,8 +23,10 @@ from app.models import (
     HealthResponse,
     OrchestrationResult,
     PayInstallmentRequest,
+    PaymentDetailResponse,
+    PaymentHistoryItem,
 )
-from app.services.orchestrator import checkout, pay_installment
+from app.services.orchestrator import checkout, pay_installment, payment_detail
 
 
 @asynccontextmanager
@@ -37,7 +40,7 @@ settings = get_settings()
 app = FastAPI(
     title=settings.app_name,
     description="Collectus Smart Autocharge — shop, installments, RPM + Autopay",
-    version="0.2.0",
+    version="0.3.0",
     lifespan=lifespan,
 )
 
@@ -87,6 +90,23 @@ def customer_installments(customer_id: str) -> dict:
     if not get_customer(customer_id):
         return {"installments": []}
     return {"installments": list_installments(customer_id)}
+
+
+@app.get("/api/customers/{customer_id}/payment-history")
+def customer_payment_history(customer_id: str) -> dict:
+    if not get_customer(customer_id):
+        return {"history": []}
+    return {
+        "history": [
+            PaymentHistoryItem.model_validate(item)
+            for item in list_payment_history(customer_id)
+        ]
+    }
+
+
+@app.get("/api/payment-events/{event_id}", response_model=PaymentDetailResponse)
+def payment_event_detail(event_id: str) -> PaymentDetailResponse:
+    return payment_detail(event_id)
 
 
 @app.post("/api/installments/{installment_id}/pay", response_model=OrchestrationResult)

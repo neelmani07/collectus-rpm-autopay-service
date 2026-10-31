@@ -142,6 +142,28 @@ class OrchestrationResult(BaseModel):
     order_snapshot: Optional[OrderOut] = None
 
 
+class PaymentHistoryItem(BaseModel):
+    history_id: str
+    event_id: Optional[str] = None
+    customer_id: str
+    payment_type: str  # manual_repayment | normal_autocharge | smart_autocharge
+    title: str
+    amount: float
+    currency: str
+    status: str
+    product_name: str = ""
+    merchant: str = ""
+    installment_id: Optional[str] = None
+    details: dict[str, Any] = Field(default_factory=dict)
+    created_at: str
+
+
+class PaymentDetailResponse(BaseModel):
+    event_id: str
+    history: list[PaymentHistoryItem]
+    orchestration: Optional[OrchestrationResult] = None
+
+
 class HealthResponse(BaseModel):
     status: str
     service: str

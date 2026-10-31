@@ -199,12 +199,29 @@ def init_db() -> None:
                 payload_json TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS payment_history (
+                history_id TEXT PRIMARY KEY,
+                event_id TEXT,
+                customer_id TEXT NOT NULL,
+                payment_type TEXT NOT NULL,
+                title TEXT NOT NULL,
+                amount REAL NOT NULL,
+                currency TEXT NOT NULL,
+                status TEXT NOT NULL,
+                product_name TEXT NOT NULL DEFAULT '',
+                merchant TEXT NOT NULL DEFAULT '',
+                installment_id TEXT,
+                details_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL
+            );
             """
         )
         version = conn.execute(
             "SELECT value FROM meta WHERE key = 'schema_version'"
         ).fetchone()
-        if not version or version["value"] != "2":
+        if not version or version["value"] != "3":
+            conn.execute("DELETE FROM payment_history")
             conn.execute("DELETE FROM decisions")
             conn.execute("DELETE FROM events")
             conn.execute("DELETE FROM installments")
@@ -212,7 +229,7 @@ def init_db() -> None:
             conn.execute("DELETE FROM products")
             conn.execute("DELETE FROM customers")
             conn.execute(
-                "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', '2')"
+                "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', '3')"
             )
             _seed(conn)
 
@@ -348,6 +365,7 @@ def _seed_overdue_order(
 
 def reset_seed_data() -> None:
     with get_connection() as conn:
+        conn.execute("DELETE FROM payment_history")
         conn.execute("DELETE FROM decisions")
         conn.execute("DELETE FROM events")
         conn.execute("DELETE FROM installments")
@@ -355,9 +373,108 @@ def reset_seed_data() -> None:
         conn.execute("DELETE FROM products")
         conn.execute("DELETE FROM customers")
         conn.execute(
-            "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', '2')"
+            "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', '3')"
         )
         _seed(conn)
+
+
+def add_payment_history(
+    *,
+    customer_id: str,
+    payment_type: str,
+    title: str,
+    amount: float,
+    currency: str,
+    status: str,
+    event_id: Optional[str] = None,
+    product_name: str = "",
+    merchant: str = "",
+    installment_id: Optional[str] = None,
+    details: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    history_id = f"pay_{uuid.uuid4().hex[:12]}"
+    created_at = _utc_now()
+    payload = details or {}
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO payment_history (
+                history_id, event_id, customer_id, payment_type, title, amount,
+                currency, status, product_name, merchant, installment_id,
+                details_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                history_id,
+                event_id,
+                customer_id,
+                payment_type,
+                title,
+                amount,
+                currency,
+                status,
+                product_name,
+                merchant,
+                installment_id,
+                json.dumps(payload),
+                created_at,
+            ),
+        )
+    return get_payment_history_item(history_id)  # type: ignore[return-value]
+
+
+def get_payment_history_item(history_id: str) -> Optional[dict[str, Any]]:
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM payment_history WHERE history_id = ?",
+            (history_id,),
+        ).fetchone()
+        return _history_row(row) if row else None
+
+
+def list_payment_history(customer_id: str, limit: int = 50) -> list[dict[str, Any]]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM payment_history
+            WHERE customer_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (customer_id, limit),
+        ).fetchall()
+        return [_history_row(row) for row in rows]
+
+
+def get_payment_history_by_event(event_id: str) -> list[dict[str, Any]]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM payment_history
+            WHERE event_id = ?
+            ORDER BY created_at ASC
+            """,
+            (event_id,),
+        ).fetchall()
+        return [_history_row(row) for row in rows]
+
+
+def _history_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "history_id": row["history_id"],
+        "event_id": row["event_id"],
+        "customer_id": row["customer_id"],
+        "payment_type": row["payment_type"],
+        "title": row["title"],
+        "amount": row["amount"],
+        "currency": row["currency"],
+        "status": row["status"],
+        "product_name": row["product_name"],
+        "merchant": row["merchant"],
+        "installment_id": row["installment_id"],
+        "details": json.loads(row["details_json"] or "{}"),
+        "created_at": row["created_at"],
+    }
 
 
 def list_customers() -> list[dict[str, Any]]:

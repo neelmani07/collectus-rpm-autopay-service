@@ -9,11 +9,14 @@ from fastapi import HTTPException
 
 from app.config import get_settings
 from app.db import (
+    add_payment_history,
     apply_autocharge_to_overdue,
     create_checkout,
     get_customer,
+    get_decision,
     get_installment,
     get_order,
+    get_payment_history_by_event,
     list_overdue_installments,
     mark_installment_paid,
     save_decision,
@@ -27,6 +30,8 @@ from app.models import (
     FeatureSet,
     OrderOut,
     OrchestrationResult,
+    PaymentDetailResponse,
+    PaymentHistoryItem,
 )
 from app.services import ai_client, autopay
 
@@ -45,6 +50,19 @@ def checkout(customer_id: str, product_id: str, plan: int) -> CheckoutResult:
 
     first = next((i for i in order["installments"] if i["sequence"] == 1), None)
     first_amount = float(first["amount"]) if first else 0.0
+    if first:
+        add_payment_history(
+            customer_id=customer_id,
+            payment_type="manual_repayment",
+            title=f"First payment · {order['product_name']}",
+            amount=first_amount,
+            currency=order["currency"],
+            status="succeeded",
+            product_name=order["product_name"],
+            merchant=order["merchant"],
+            installment_id=first["installment_id"],
+            details={"source": "checkout", "sequence": 1, "plan": plan},
+        )
     return CheckoutResult(
         order=OrderOut.model_validate(order),
         first_payment_amount=first_amount,
@@ -149,6 +167,85 @@ async def pay_installment(installment_id: str, customer_id: str) -> Orchestratio
         )
 
     order_snapshot = get_order(paid["order_id"])
+    product_name = paid.get("product_name", "")
+    merchant = paid.get("merchant", "")
+
+    # Customer-facing history: three payment kinds
+    add_payment_history(
+        customer_id=customer_id,
+        event_id=event_id,
+        payment_type="manual_repayment",
+        title=f"Manual repayment · {product_name}",
+        amount=amount_paid,
+        currency=currency,
+        status="succeeded",
+        product_name=product_name,
+        merchant=merchant,
+        installment_id=installment_id,
+        details={
+            "sequence": paid.get("sequence"),
+            "plan_size": paid.get("plan_size"),
+            "description": "Customer chose to pay this installment.",
+        },
+    )
+
+    # Normal (cron-style) autocharge baseline — what would run without AI
+    add_payment_history(
+        customer_id=customer_id,
+        event_id=event_id,
+        payment_type="normal_autocharge",
+        title="Normal autocharge (cron-style)",
+        amount=overdue_before,
+        currency=currency,
+        status="baseline_not_executed" if overdue_before > 0 else "nothing_due",
+        product_name=product_name,
+        merchant=merchant,
+        details={
+            "description": (
+                "Blind schedule-based autocharge would attempt the full remaining overdue "
+                "with no AI check."
+                if overdue_before > 0
+                else "No other overdue — normal autocharge would also do nothing."
+            ),
+            "would_charge_amount": overdue_before,
+        },
+    )
+
+    smart_status = "skipped"
+    smart_amount = 0.0
+    if charge_result.status == "success" and decision.amount > 0:
+        smart_status = "succeeded"
+        smart_amount = decision.amount
+    elif decision.action == DecisionAction.SKIP:
+        smart_status = "skipped_by_ai"
+    elif charge_result.status == "failed":
+        smart_status = "failed"
+    elif overdue_before <= 0:
+        smart_status = "nothing_due"
+
+    add_payment_history(
+        customer_id=customer_id,
+        event_id=event_id,
+        payment_type="smart_autocharge",
+        title="Smart autocharge",
+        amount=smart_amount if smart_status == "succeeded" else overdue_before,
+        currency=currency,
+        status=smart_status,
+        product_name=product_name,
+        merchant=merchant,
+        details={
+            "description": "AI decided whether Autopay should collect other overdue after your repayment.",
+            "ai_action": decision.action.value,
+            "ai_score": decision.score,
+            "ai_reason": decision.reason,
+            "autopay_status": charge_result.status,
+            "autopay_message": charge_result.message,
+            "installments_settled": charge_result.installments_settled,
+            "overdue_before": overdue_before,
+            "overdue_after": overdue_after,
+        },
+    )
+
     result = OrchestrationResult(
         event_id=event_id,
         customer_id=customer_id,
@@ -166,3 +263,18 @@ async def pay_installment(installment_id: str, customer_id: str) -> Orchestratio
     )
     save_decision(result)
     return result
+
+
+def payment_detail(event_id: str) -> PaymentDetailResponse:
+    history = get_payment_history_by_event(event_id)
+    if not history:
+        raise HTTPException(status_code=404, detail="Payment event not found")
+    orchestration_raw = get_decision(event_id)
+    orchestration = (
+        OrchestrationResult.model_validate(orchestration_raw) if orchestration_raw else None
+    )
+    return PaymentDetailResponse(
+        event_id=event_id,
+        history=[PaymentHistoryItem.model_validate(item) for item in history],
+        orchestration=orchestration,
+    )
