@@ -19,20 +19,22 @@ def execute_charge(
         return AutopayResult(
             status="skipped",
             transaction_id=None,
-            message="No charge executed",
+            message="No autocharge executed",
+            installments_settled=[],
         )
 
-    # Simulate decline for very unhealthy PM even if AI somehow approved
     if float(customer["pm_health"]) < 0.2:
         return AutopayResult(
             status="failed",
             transaction_id=None,
             message="Simulated issuer decline — payment method unhealthy",
+            installments_settled=[],
         )
 
     tx_id = f"tx_{idempotency_key[-8:]}_{uuid.uuid4().hex[:6]}"
     return AutopayResult(
         status="success",
         transaction_id=tx_id,
-        message=f"Charged {customer.get('currency', 'SAR')} {amount:.2f} (simulated)",
+        message=f"Autocharged {customer.get('currency', 'SAR')} {amount:.2f} (simulated)",
+        installments_settled=[],
     )

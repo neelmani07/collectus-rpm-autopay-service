@@ -13,23 +13,46 @@ class DecisionAction(str, Enum):
     SKIP = "skip"
 
 
-class CustomerSeed(BaseModel):
+class InstallmentStatus(str, Enum):
+    PAID = "paid"
+    UPCOMING = "upcoming"
+    DUE = "due"
+    OVERDUE = "overdue"
+
+
+class CustomerOut(BaseModel):
     customer_id: str
     name: str
-    overdue_amount: float
-    days_overdue: int
-    pm_health: float = Field(ge=0, le=1)
-    fails_7d: int = 0
-    recent_success: float = Field(ge=0, le=1, default=0.5)
+    pm_health: float
+    fails_7d: int
+    recent_success: float
     currency: str = "SAR"
     scenario: str
     notes: str = ""
+    overdue_amount: float = 0
+    days_overdue: int = 0
 
 
-class RepayRequest(BaseModel):
-    customer_id: str
-    amount: float = Field(gt=0)
+class ProductOut(BaseModel):
+    product_id: str
+    name: str
+    merchant: str
+    category: str
+    price: float
     currency: str = "SAR"
+    badge: str = ""
+    accent: str = "#9600F1"
+    description: str = ""
+
+
+class CheckoutRequest(BaseModel):
+    customer_id: str
+    product_id: str
+    plan: int = Field(default=4, ge=2, le=6)
+
+
+class PayInstallmentRequest(BaseModel):
+    customer_id: str
 
 
 class FeatureSet(BaseModel):
@@ -58,13 +81,49 @@ class DecisionResponse(BaseModel):
     score: float
     reason: str
     baseline_action: DecisionAction = DecisionAction.CHARGE
-    source: str = "mock"  # mock | remote
+    source: str = "mock"
 
 
 class AutopayResult(BaseModel):
     status: str
     transaction_id: Optional[str] = None
     message: str = ""
+    installments_settled: list[str] = Field(default_factory=list)
+
+
+class InstallmentOut(BaseModel):
+    installment_id: str
+    order_id: str
+    customer_id: str
+    product_name: str
+    merchant: str
+    sequence: int
+    plan_size: int
+    amount: float
+    currency: str
+    due_date: str
+    status: InstallmentStatus
+    paid_at: Optional[str] = None
+
+
+class OrderOut(BaseModel):
+    order_id: str
+    customer_id: str
+    product_id: str
+    product_name: str
+    merchant: str
+    total_amount: float
+    currency: str
+    plan: int
+    created_at: str
+    accent: str = "#9600F1"
+    installments: list[InstallmentOut] = Field(default_factory=list)
+
+
+class CheckoutResult(BaseModel):
+    order: OrderOut
+    first_payment_amount: float
+    message: str
 
 
 class OrchestrationResult(BaseModel):
@@ -73,12 +132,14 @@ class OrchestrationResult(BaseModel):
     customer_name: str
     scenario: str
     amount_paid: float
+    paid_installment_id: Optional[str] = None
     overdue_before: float
     currency: str
     decision: DecisionResponse
     autopay: Optional[AutopayResult] = None
     overdue_after: float
     created_at: datetime
+    order_snapshot: Optional[OrderOut] = None
 
 
 class HealthResponse(BaseModel):
