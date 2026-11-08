@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Optional
+import uuid
+from typing import AsyncIterator, Literal, Optional
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,6 +30,7 @@ from app.models import (
     PaymentDetailResponse,
     PaymentHistoryItem,
 )
+from app.services.insights import model_info, month_backtest, playground_decide
 from app.services.orchestrator import (
     checkout,
     pay_installment,
@@ -158,6 +160,60 @@ async def cron_collections(body: CronRequest) -> CronRunResult:
         customer_id=body.customer_id,
         scheduled_for=body.scheduled_for,
     )
+
+
+@app.get("/api/insights/backtest")
+async def insights_backtest(refresh: bool = False) -> dict:
+    """30-day backtest from the AI service: cron vs always-charge vs simple rule vs AI."""
+    return await month_backtest(settings, refresh=refresh)
+
+
+class PlaygroundRequest(BaseModel):
+    """Any customer profile; nothing is charged or stored."""
+
+    event_type: Literal["repayment.succeeded", "schedule.due"] = "repayment.succeeded"
+    overdue_amount: float = Field(gt=0, le=20000)
+    amount_paid: float = Field(ge=0, le=20000)
+    days_overdue: int = Field(ge=0, le=365)
+    pm_health: float = Field(ge=0, le=1)
+    fails_7d: int = Field(ge=0, le=10)
+    recent_success: float = Field(ge=0, le=1)
+    declines_left: int = Field(ge=0, le=6)
+    card_network: Literal["mada", "visa", "mastercard"] = "mada"
+    card_token: Literal["plastic", "apple_pay"] = "plastic"
+    card_funding: Literal["debit", "credit", "prepaid"] = "debit"
+
+
+@app.post("/api/playground/decide")
+async def playground(body: PlaygroundRequest) -> dict:
+    """Try the AI with your own input. Read-only: nothing is charged or saved."""
+    repayment = body.event_type == "repayment.succeeded"
+    payload = {
+        "event_id": f"evt_play_{uuid.uuid4().hex[:16]}",
+        "customer_id": "playground",
+        "event_type": body.event_type,
+        "amount_paid": body.amount_paid if repayment else 0.0,
+        "overdue_amount": body.overdue_amount,
+        "currency": "SAR",
+        "features": {
+            "days_overdue": body.days_overdue,
+            "pm_health": body.pm_health,
+            "fails_7d": body.fails_7d,
+            "recent_success": body.recent_success,
+            "repayment_strength": min(1.0, body.amount_paid / body.overdue_amount) if repayment else 0.0,
+            "declines_left": body.declines_left,
+            "card_network": body.card_network,
+            "card_token": body.card_token,
+            "card_funding": body.card_funding,
+        },
+    }
+    return await playground_decide(settings, payload)
+
+
+@app.get("/api/insights/model")
+async def insights_model() -> dict:
+    """What the live model learned: coefficients and quality metrics."""
+    return await model_info(settings)
 
 
 @app.get("/api/decisions")

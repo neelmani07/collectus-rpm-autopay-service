@@ -32,6 +32,9 @@ Docs: http://127.0.0.1:8000/docs
 | GET | `/api/customers/{id}/installments` | Flat installment list |
 | POST | `/api/installments/{id}/pay` | Pay installment → RPM → AI → Autopay |
 | POST | `/api/admin/reset` | Reset seed data |
+| GET | `/api/insights/backtest` | AI service's 30-day backtest (cached) for the Why AI? tab |
+| GET | `/api/insights/model` | Live model weights and metrics (cached) |
+| POST | `/api/playground/decide` | Ask the AI about any customer profile — read-only, nothing charged |
 
 ## AI
 

@@ -91,6 +91,13 @@ class DecisionResponse(BaseModel):
     reason: str
     baseline_action: DecisionAction = DecisionAction.CHARGE
     source: str = "mock"
+    # Extra context returned by the AI decision service (absent in the mock scorecard)
+    next_best_action: Optional[str] = None
+    drivers: list[dict[str, Any]] = Field(default_factory=list)
+    card: Optional[str] = None
+    declines_left: Optional[int] = None
+    min_success_prob_applied: Optional[float] = None
+    gate: Optional[str] = None
 
 
 class AutopayResult(BaseModel):
